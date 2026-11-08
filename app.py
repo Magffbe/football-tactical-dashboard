@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from mplsoccer import Pitch, VerticalPitch
+from mplsoccer import Pitch, VerticalPitch, PyPizza
 from statsbombpy import sb
 
 # Configuración de la página web
@@ -37,16 +37,20 @@ df_eventos = cargar_eventos(match_id)
 st.markdown(f"### 🏟️ Partido Seleccionado: **{partido_seleccionado_str}**")
 st.divider()
 
-# CREAMOS DOS PESTAÑAS INTERACTIVAS (Tabs) EN STREAMLIT
-tab1, tab2 = st.tabs(["👤 Análisis Individual de Jugador", "🥅 Mapa de Tiros y Expected Goals (xG)"])
+# PESTAÑAS INTERACTIVAS (Tabs)
+tab1, tab2, tab3 = st.tabs([
+    "👤 Análisis Individual", 
+    "🥅 Mapa de Tiros y xG", 
+    "⚔️ Comparador de Jugadores (Radar)"
+])
 
 # ==========================================
-# PESTAÑA 1: ANÁLISIS DE JUGADOR (PASES Y HEATMAP)
+# PESTAÑA 1: ANÁLISIS DE JUGADOR
 # ==========================================
 with tab1:
     pases_df = df_eventos[df_eventos['type'] == 'Pass'].copy()
     lista_jugadores = sorted(pases_df['player'].dropna().unique())
-    jugador_seleccionado = st.sidebar.selectbox("Selecciona un Jugador:", lista_jugadores)
+    jugador_seleccionado = st.sidebar.selectbox("Selecciona un Jugador (Vista Individual):", lista_jugadores)
 
     pases_jugador = pases_df[pases_df['player'] == jugador_seleccionado]
 
@@ -97,19 +101,17 @@ with tab1:
         st.pyplot(fig2)
 
 # ==========================================
-# PESTAÑA 2: MAPA DE TIROS Y xG DEL PARTIDO
+# PESTAÑA 2: MAPA DE TIROS Y xG
 # ==========================================
 with tab2:
     st.subheader("🎯 Comparativa de Remates y Expected Goals (xG)")
     
-    # Filtrar eventos de tipo Shot
     tiros = df_eventos[df_eventos['type'] == 'Shot'].copy()
     equipos = tiros['team'].unique()
     
     if len(equipos) >= 2:
         eq1, eq2 = equipos[0], equipos[1]
         
-        # Obtener xG acumulado por equipo
         xg_eq1 = tiros[tiros['team'] == eq1]['shot_statsbomb_xg'].sum()
         xg_eq2 = tiros[tiros['team'] == eq2]['shot_statsbomb_xg'].sum()
         
@@ -119,7 +121,6 @@ with tab2:
         
         st.divider()
         
-        # Dibujar Canchas Verticales Lado a Lado
         cancha_media = VerticalPitch(pitch_type='statsbomb', half=True, pitch_color='#19232d', line_color='#c7d5cc')
         fig_shots, (ax_e1, ax_e2) = plt.subplots(1, 2, figsize=(10, 5), facecolor='#19232d')
         
@@ -141,3 +142,75 @@ with tab2:
         render_tiros(tiros, eq2, ax_e2)
         
         st.pyplot(fig_shots)
+
+# ==========================================
+# PESTAÑA 3: COMPARADOR DE JUGADORES (RADAR)
+# ==========================================
+with tab3:
+    st.subheader("⚔️ Comparador Cara a Cara de Jugadores")
+    
+    todos_jugadores = sorted(df_eventos['player'].dropna().unique())
+    
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        j1 = st.selectbox("Selecciona Jugador 1 (Verde):", todos_jugadores, index=0)
+    with col_sel2:
+        j2 = st.selectbox("Selecciona Jugador 2 (Azul):", todos_jugadores, index=min(1, len(todos_jugadores)-1))
+        
+    def obtener_metrics(nombre):
+        df_j = df_eventos[df_eventos['player'] == nombre]
+        pases = df_j[df_j['type'] == 'Pass']
+        tot_p = len(pases)
+        p_comp = len(pases[pases['pass_outcome'].isna()])
+        prec_p = (p_comp / tot_p * 100) if tot_p > 0 else 0
+        
+        pases_prog = 0
+        for _, p in pases.iterrows():
+            if (p['pass_end_location'][0] - p['location'][0]) >= 10:
+                pases_prog += 1
+                
+        tiros_j = df_j[df_j['type'] == 'Shot']
+        tot_t = len(tiros_j)
+        xg = tiros_j['shot_statsbomb_xg'].sum() if tot_t > 0 else 0
+        defensivas = len(df_j[df_j['type'].isin(['Duel', 'Interception', 'Ball Recovery'])])
+        
+        return [tot_p, round(prec_p, 1), pases_prog, tot_t, round(xg, 2), defensivas]
+
+    params = ["Pases Intentados", "Precisión Pases %", "Pases Progresivos", "Tiros", "xG Generado", "Acciones Defensivas"]
+    val1 = obtener_metrics(j1)
+    val2 = obtener_metrics(j2)
+
+    col_rad, col_tab = st.columns([1.2, 1])
+    
+    with col_rad:
+        baker = PyPizza(
+            params=params,
+            background_color="#19232d",
+            straight_line_color="#c7d5cc",
+            straight_line_lw=1,
+            last_circle_lw=1,
+            other_circle_lw=1,
+            inner_circle_size=5
+        )
+
+        fig_pizza, ax_pizza = baker.make_pizza(
+            val1,
+            compare_values=val2,
+            figsize=(7, 7),
+            param_location=106,
+            kwargs_slices=dict(facecolor="#2ecc71", edgecolor="#19232d", linewidth=1, alpha=0.6),
+            kwargs_compare=dict(facecolor="#3498db", edgecolor="#19232d", linewidth=1, alpha=0.6),
+            kwargs_params=dict(color="white", fontsize=10),
+            kwargs_values=dict(alpha=0),
+            kwargs_compare_values=dict(alpha=0)
+        )
+        st.pyplot(fig_pizza)
+
+    with col_tab:
+        st.markdown(f"#### 📊 Métricas Comparativas")
+        df_comp = pd.DataFrame({
+            'Métrica': params,
+            j1: val1,
+            j2: val2
+        })
+        st.dataframe(df_comp, use_container_width=True, hide_index=True)
