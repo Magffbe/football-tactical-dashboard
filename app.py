@@ -84,7 +84,7 @@ with tab1:
         for _, pase in pases_jugador.iterrows():
             x_ini, y_ini = pase['location'][0], pase['location'][1]
             x_fin, y_fin = pase['pass_end_location'][0], pase['pass_end_location'][1]
-            color = '#e74c3c' if isinstance(pase['pass_outcome'], str) else '#2ecc71'
+            color = '#f1c40f' if isinstance(pase['pass_outcome'], str) else '#2ecc71'
             cancha1.arrows(x_ini, y_ini, x_fin, y_fin, ax=ax1, color=color, alpha=0.7, width=2)
         st.pyplot(fig1)
 
@@ -133,7 +133,7 @@ with tab2:
                 es_gol = tiro['shot_outcome'] == 'Goal'
                 color = '#2ecc71' if es_gol else '#e74c3c'
                 alpha = 0.9 if es_gol else 0.4
-                tamano = tiro['shot_statsbomb_xg'] * 700 + 40
+                tamano = tiro['shot_statsbomb_xg'] * 800 + 50
                 cancha_media.scatter(x_t, y_t, s=tamano, color=color, alpha=alpha, edgecolors='white', ax=ax_target)
                 
             ax_target.set_title(f"{equipo}\nxG Total: {tiros_e['shot_statsbomb_xg'].sum():.2f}", color='white', fontsize=11)
@@ -172,7 +172,7 @@ with tab3:
         tiros_j = df_j[df_j['type'] == 'Shot']
         tot_t = len(tiros_j)
         xg = tiros_j['shot_statsbomb_xg'].sum() if tot_t > 0 else 0
-        defensivas = len(df_j[df_j['type'].isin(['Duel', 'Interception', 'Ball Recovery'])])
+        defensivas = len(df_j[df_j['type'].isin(['Duel', 'Interception', 'Ball Recovery', 'Block'])])
         
         return [tot_p, round(prec_p, 1), pases_prog, tot_t, round(xg, 2), defensivas]
 
