@@ -62,12 +62,12 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # =========================================================
-# PESTAÑA 1: ANÁLISIS INDIVIDUAL Y MAPAS (CON SHOTMAP XG)
+# PESTAÑA 1: ANÁLISIS INDIVIDUAL Y MAPAS (CON TOGGLE P90)
 # =========================================================
 with tab1:
     st.header("📊 Rendimiento Individual y Mapas de Acción")
     
-    col_sel1, col_sel2 = st.columns(2)
+    col_sel1, col_sel2, col_sel3 = st.columns([2, 2, 1])
     with col_sel1:
         partido_label1 = st.selectbox("Selecciona un Partido:", list(dict_partidos.keys()), key="p1_match")
         match_id1 = dict_partidos[partido_label1]
@@ -83,25 +83,31 @@ with tab1:
         jugadores1 = sorted([j for j in df_eq1['player_name'].unique() if j])
         jugador_sel1 = st.selectbox("Selecciona un Jugador:", jugadores1, key="p1_player")
         
-        df_j1 = df_eq1[df_eq1['player_name'] == jugador_sel1]
-        pases_j1 = df_j1[df_j1['type_name'] == 'Pass'].copy()
+        # Selector de Modo de Vista: Totales vs P90
+        with col_sel3:
+            modo_vista = st.radio("Modo Métrica:", ["Totales", "Por 90 min (P90)"], key="p1_mode")
         
+        df_j1 = df_eq1[df_eq1['player_name'] == jugador_sel1]
+        
+        # 1. Calcular minutos jugados
+        min_inicio = df_j1['minute'].min() if len(df_j1) > 0 else 0
+        min_fin = df_j1['minute'].max() if len(df_j1) > 0 else 0
+        mins_jugados = max(1, (min_fin - min_inicio) + 1)
+        
+        # 2. Pases
+        pases_j1 = df_j1[df_j1['type_name'] == 'Pass'].copy()
         def es_comp(row):
             p_dict = row.get('pass', {})
             return 'outcome' not in p_dict if isinstance(p_dict, dict) else False
             
         pases_j1['es_completado'] = pases_j1.apply(es_comp, axis=1)
         
-        # Métricas individuales (KPIs)
         total_p = len(pases_j1)
         comp_p = len(pases_j1[pases_j1['es_completado']])
         fall_p = total_p - comp_p
         prec_p = (comp_p / total_p * 100) if total_p > 0 else 0
         
-        tiros_j1 = df_j1[df_j1['type_name'] == 'Shot']
-        total_tiros = len(tiros_j1)
-        xg_total = sum([t.get('shot', {}).get('statsbomb_xg', 0) for _, t in tiros_j1.iterrows() if isinstance(t.get('shot'), dict)])
-        
+        # Pases progresivos
         pases_prog = 0
         for _, p in pases_j1.iterrows():
             pass_dict = p.get('pass', {})
@@ -109,12 +115,35 @@ with tab1:
                 if (pass_dict['end_location'][0] - p['x']) >= 10:
                     pases_prog += 1
 
+        # Tiros y xG
+        tiros_j1 = df_j1[df_j1['type_name'] == 'Shot']
+        total_tiros = len(tiros_j1)
+        xg_total = sum([t.get('shot', {}).get('statsbomb_xg', 0) for _, t in tiros_j1.iterrows() if isinstance(t.get('shot'), dict)])
+        
+        # 3. Aplicar conversión P90 si el usuario lo activa
+        if modo_vista == "Por 90 min (P90)":
+            total_p_disp = round((total_p / mins_jugados) * 90, 1)
+            comp_p_disp = round((comp_p / mins_jugados) * 90, 1)
+            fall_p_disp = round((fall_p / mins_jugados) * 90, 1)
+            pases_prog_disp = round((pases_prog / mins_jugados) * 90, 1)
+            xg_disp = round((xg_total / mins_jugados) * 90, 2)
+            label_suffix = " (P90)"
+        else:
+            total_p_disp = total_p
+            comp_p_disp = comp_p
+            fall_p_disp = fall_p
+            pases_prog_disp = pases_prog
+            xg_disp = round(xg_total, 2)
+            label_suffix = ""
+
+        st.caption(f"⏱️ Minutos aproximados jugados por **{jugador_sel1}**: **{mins_jugados} min**")
+
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Pases Intentados", total_p)
-        c2.metric("Completados", comp_p)
-        c3.metric("Fallados", fall_p)
-        c4.metric("Precisión", f"{prec_p:.1f}%")
-        c5.metric("xG Acumulado", f"{xg_total:.2f}")
+        c1.metric(f"Pases Intentados{label_suffix}", total_p_disp)
+        c2.metric(f"Completados{label_suffix}", comp_p_disp)
+        c3.metric(f"Fallados{label_suffix}", fall_p_disp)
+        c4.metric("Precisión Pases", f"{prec_p:.1f}%")
+        c5.metric(f"xG Acumulado{label_suffix}", xg_disp)
         
         st.divider()
         
@@ -144,7 +173,7 @@ with tab1:
             
         st.divider()
 
-        # NUEVO MÓDULO: MAPA DE TIROS Y XG DEL EQUIPO EN EL PARTIDO
+        # MAPA DE TIROS Y XG DEL EQUIPO
         st.markdown(f"#### 🎯 Mapa de Tiros (Shotmap) y xG del Equipo: **{equipo_sel1}**")
         st.caption("● Gol (Verde)  |  ● Atajado/Bloqueado (Rojo)  |  ● Desviado (Gris)   [Círculo grande = Mayor xG]")
         
@@ -165,7 +194,7 @@ with tab1:
         col_shot1, col_shot2, col_shot3 = st.columns([1, 3, 1])
         with col_shot2:
             fig_shot, ax_shot = plt.subplots(figsize=(8, 5.2), facecolor='#19232d')
-            pitch.draw(ax=ax_shot)
+            pitch.draw(ax_shot)
             
             if len(df_tiros_eq) > 0:
                 pitch.scatter(
