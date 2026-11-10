@@ -1,216 +1,161 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from mplsoccer import Pitch, VerticalPitch, PyPizza
-from statsbombpy import sb
+from mplsoccer import Pitch
 
-# Configuración de la página web
-st.set_page_config(page_title="Dashboard de Análisis Táctico", page_icon="⚽", layout="wide")
+# 1. Configuración principal de la página
+st.set_page_config(
+    page_title="Football Data Analytics | Passing Networks",
+    page_icon="⚽",
+    layout="wide"
+)
 
-st.title("⚽ Dashboard Táctico de Fútbol - Inteligencia Deportiva")
-
-# 1. Cargar partidos disponibles en StatsBomb (Mundial 2022)
-@st.cache_data
-def cargar_partidos():
-    return sb.matches(competition_id=43, season_id=106)
-
-df_partidos = cargar_partidos()
-
-# Selector de partidos en el sidebar
-partidos_dict = {
-    f"{row['home_team']} {row['home_score']} - {row['away_score']} {row['away_team']} ({row['match_date']})": row['match_id']
-    for _, row in df_partidos.iterrows()
-}
-
-st.sidebar.header("⚙️ Filtros de Selección")
-partido_seleccionado_str = st.sidebar.selectbox("Selecciona un Partido:", list(partidos_dict.keys()))
-match_id = partidos_dict[partido_seleccionado_str]
-
-# 2. Cargar eventos del partido seleccionado
-@st.cache_data
-def cargar_eventos(m_id):
-    return sb.events(match_id=m_id)
-
-df_eventos = cargar_eventos(match_id)
-
-st.markdown(f"### 🏟️ Partido Seleccionado: **{partido_seleccionado_str}**")
+st.title("⚽ Dashboard Táctico de Fútbol - Passing Networks")
+st.markdown("Análisis avanzado de rendimiento individual y redes de pases del equipo.")
 st.divider()
 
-# PESTAÑAS INTERACTIVAS (Tabs)
-tab1, tab2, tab3 = st.tabs([
-    "👤 Análisis Individual", 
-    "🥅 Mapa de Tiros y xG", 
-    "⚔️ Comparador de Jugadores (Radar)"
-])
+# 2. Cargar datos del partido seleccionado (Japón vs España por URL raw verificada)
+@st.cache_data
+def cargar_eventos_partido():
+    match_id = 3857255
+    url = f"https://raw.githubusercontent.com/statsbomb/open-data/master/data/events/{match_id}.json"
+    df = pd.read_json(url)
+    
+    # Extraer nombres de diccionarios
+    df['type_name'] = df['type'].apply(lambda x: x['name'] if isinstance(x, dict) else '')
+    df['team_name'] = df['team'].apply(lambda x: x['name'] if isinstance(x, dict) else '')
+    df['player_name'] = df['player'].apply(lambda x: x['name'] if isinstance(x, dict) else '')
+    df['x'] = df['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else None)
+    df['y'] = df['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else None)
+    return df
 
-# ==========================================
-# PESTAÑA 1: ANÁLISIS DE JUGADOR
-# ==========================================
-with tab1:
-    pases_df = df_eventos[df_eventos['type'] == 'Pass'].copy()
-    lista_jugadores = sorted(pases_df['player'].dropna().unique())
-    jugador_seleccionado = st.sidebar.selectbox("Selecciona un Jugador (Vista Individual):", lista_jugadores)
+df_eventos = cargar_eventos_partido()
 
-    pases_jugador = pases_df[pases_df['player'] == jugador_seleccionado]
+# Barra lateral de filtros
+st.sidebar.header("⚙️ Configuración")
+equipos_disponibles = sorted([t for t in df_eventos['team_name'].unique() if t])
+equipo_seleccionado = st.sidebar.selectbox("Selecciona un Equipo:", equipos_disponibles)
 
-    # KPIs de jugador
-    st.subheader(f"📊 Rendimiento de {jugador_seleccionado}")
-    total_pases = len(pases_jugador)
-    completados = len(pases_jugador[pases_jugador['pass_outcome'].isna()])
-    fallados = total_pases - completados
-    precision = (completados / total_pases * 100) if total_pases > 0 else 0
+# ---------------------------------------------------------
+# FILTRADO DE PASES COMPLETADOS DEL EQUIPO
+# ---------------------------------------------------------
+def es_pase_completado(row):
+    if row['type_name'] == 'Pass' and row['team_name'] == equipo_seleccionado:
+        pass_dict = row.get('pass', {})
+        if isinstance(pass_dict, dict):
+            return 'outcome' not in pass_dict
+    return False
 
-    pases_progresivos = 0
+pases_equipo = df_eventos[df_eventos.apply(es_pase_completado, axis=1)].copy()
+pases_equipo['recipient_name'] = pases_equipo['pass'].apply(
+    lambda x: x.get('recipient', {}).get('name', '') if isinstance(x, dict) and isinstance(x.get('recipient'), dict) else ''
+)
+
+# ---------------------------------------------------------
+# SECCIÓN 1: RED DE PASES DEL EQUIPO (PASSING NETWORK)
+# ---------------------------------------------------------
+st.header(f"🕸️ Passing Network: {equipo_seleccionado}")
+
+# A. Posiciones promedio
+posiciones_promedio = pases_equipo.groupby('player_name').agg(
+    x_mean=('x', 'mean'),
+    y_mean=('y', 'mean'),
+    total_pases=('x', 'count')
+).reset_index().sort_values(by='total_pases', ascending=False)
+
+# B. Conexiones entre parejas
+conexiones = pases_equipo.groupby(['player_name', 'recipient_name']).size().reset_index(name='pass_count')
+conexiones = conexiones.merge(
+    posiciones_promedio[['player_name', 'x_mean', 'y_mean']], 
+    on='player_name'
+).rename(columns={'x_mean': 'x_start', 'y_mean': 'y_start'})
+
+conexiones = conexiones.merge(
+    posiciones_promedio[['player_name', 'x_mean', 'y_mean']], 
+    left_on='recipient_name', 
+    right_on='player_name', 
+    suffixes=('', '_end')
+).rename(columns={'x_mean': 'x_end', 'y_mean': 'y_end'})
+
+# Filtrar conexiones de 2 pases o más
+conexiones = conexiones[conexiones['pass_count'] >= 2]
+
+# C. Graficar la Red de Pases
+fig_network, ax_network = plt.subplots(figsize=(10, 7), facecolor='#19232d')
+pitch = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
+pitch.draw(ax=ax_network)
+
+# Líneas de conexión
+for _, row in conexiones.iterrows():
+    grosor = row['pass_count'] * 0.8
+    alpha_val = min(row['pass_count'] / conexiones['pass_count'].max(), 1.0)
+    pitch.lines(
+        row['x_start'], row['y_start'],
+        row['x_end'], row['y_end'],
+        ax=ax_network, color='#2ecc71', lw=grosor, alpha=alpha_val, zorder=1
+    )
+
+# Nodos de jugadores
+pitch.scatter(
+    posiciones_promedio['x_mean'], posiciones_promedio['y_mean'],
+    s=posiciones_promedio['total_pases'] * 25,
+    color='#e74c3c', edgecolors='white', linewidth=2, alpha=0.9, ax=ax_network, zorder=2
+)
+
+# Nombres
+for _, row in posiciones_promedio.iterrows():
+    apellido = row['player_name'].split()[-1] if row['player_name'] else ''
+    pitch.annotate(
+        apellido, xy=(row['x_mean'], row['y_mean']),
+        c='white', va='center', ha='center', size=9, weight='bold', ax=ax_network, zorder=3
+    )
+
+ax_network.set_title(f"Estructura Táctica y Pases entre Jugadores - {equipo_seleccionado}", color='white', fontsize=12)
+st.pyplot(fig_network)
+
+st.divider()
+
+# ---------------------------------------------------------
+# SECCIÓN 2: ANÁLISIS INDIVIDUAL DE JUGADOR
+# ---------------------------------------------------------
+st.header("👤 Análisis por Jugador")
+
+jugadores_equipo = sorted([j for j in pases_equipo['player_name'].unique() if j])
+jugador_sel = st.sidebar.selectbox("Selecciona un Jugador:", jugadores_equipo)
+
+pases_jugador = pases_equipo[pases_equipo['player_name'] == jugador_sel]
+
+col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+col_kpi1.metric("Pases Completados", len(pases_jugador))
+col_kpi2.metric("Posición Promedio X", f"{posiciones_promedio[posiciones_promedio['player_name'] == jugador_sel]['x_mean'].values[0]:.1f}")
+col_kpi3.metric("Posición Promedio Y", f"{posiciones_promedio[posiciones_promedio['player_name'] == jugador_sel]['y_mean'].values[0]:.1f}")
+
+col_graf1, col_graf2 = st.columns(2)
+
+with col_graf1:
+    st.subheader(f"🗺️ Mapa de Pases: {jugador_sel}")
+    fig_ind, ax_ind = plt.subplots(figsize=(6, 4.5), facecolor='#19232d')
+    pitch.draw(ax=ax_ind)
+    
+    # Dibujar pases del jugador
     for _, pase in pases_jugador.iterrows():
-        if (pase['pass_end_location'][0] - pase['location'][0]) >= 10:
-            pases_progresivos += 1
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Pases Intentados", total_pases)
-    col2.metric("Completados", completados)
-    col3.metric("Fallados", fallados)
-    col4.metric("Precisión", f"{precision:.1f}%")
-    col5.metric("Pases Progresivos", pases_progresivos)
-
-    st.divider()
-
-    col_graf1, col_graf2 = st.columns(2)
-
-    with col_graf1:
-        st.subheader("🗺️ Mapa de Pases")
-        cancha1 = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
-        fig1, ax1 = cancha1.draw(figsize=(8, 6))
-        for _, pase in pases_jugador.iterrows():
-            x_ini, y_ini = pase['location'][0], pase['location'][1]
-            x_fin, y_fin = pase['pass_end_location'][0], pase['pass_end_location'][1]
-            color = '#f1c40f' if isinstance(pase['pass_outcome'], str) else '#2ecc71'
-            cancha1.arrows(x_ini, y_ini, x_fin, y_fin, ax=ax1, color=color, alpha=0.7, width=2)
-        st.pyplot(fig1)
-
-    with col_graf2:
-        st.subheader("🔥 Zona de Influencia (Heatmap)")
-        eventos_jugador = df_eventos[df_eventos['player'] == jugador_seleccionado].dropna(subset=['location'])
-        x_coords = [loc[0] for loc in eventos_jugador['location']]
-        y_coords = [loc[1] for loc in eventos_jugador['location']]
-        
-        cancha2 = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
-        fig2, ax2 = cancha2.draw(figsize=(8, 6))
-        if len(x_coords) > 0:
-            sns.kdeplot(x=x_coords, y=y_coords, fill=True, thresh=0.05, levels=100, cmap='hot', alpha=0.6, ax=ax2)
-        st.pyplot(fig2)
-
-# ==========================================
-# PESTAÑA 2: MAPA DE TIROS Y xG
-# ==========================================
-with tab2:
-    st.subheader("🎯 Comparativa de Remates y Expected Goals (xG)")
-    
-    tiros = df_eventos[df_eventos['type'] == 'Shot'].copy()
-    equipos = tiros['team'].unique()
-    
-    if len(equipos) >= 2:
-        eq1, eq2 = equipos[0], equipos[1]
-        
-        xg_eq1 = tiros[tiros['team'] == eq1]['shot_statsbomb_xg'].sum()
-        xg_eq2 = tiros[tiros['team'] == eq2]['shot_statsbomb_xg'].sum()
-        
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric(f"xG Acumulado - {eq1}", f"{xg_eq1:.2f}")
-        col_m2.metric(f"xG Acumulado - {eq2}", f"{xg_eq2:.2f}")
-        
-        st.divider()
-        
-        cancha_media = VerticalPitch(pitch_type='statsbomb', half=True, pitch_color='#19232d', line_color='#c7d5cc')
-        fig_shots, (ax_e1, ax_e2) = plt.subplots(1, 2, figsize=(10, 5), facecolor='#19232d')
-        
-        def render_tiros(df_tiros, equipo, ax_target):
-            cancha_media.draw(ax=ax_target)
-            tiros_e = df_tiros[df_tiros['team'] == equipo]
+        pass_dict = pase.get('pass', {})
+        if isinstance(pass_dict, dict) and 'end_location' in pass_dict:
+            x_end, y_end = pass_dict['end_location'][0], pass_dict['end_location'][1]
+            pitch.arrows(pase['x'], pase['y'], x_end, y_end, ax=ax_ind, color='#2ecc71', alpha=0.7, width=1.5)
             
-            for _, tiro in tiros_e.iterrows():
-                x_t, y_t = tiro['location'][0], tiro['location'][1]
-                es_gol = tiro['shot_outcome'] == 'Goal'
-                color = '#2ecc71' if es_gol else '#e74c3c'
-                alpha = 0.9 if es_gol else 0.4
-                tamano = tiro['shot_statsbomb_xg'] * 800 + 50
-                cancha_media.scatter(x_t, y_t, s=tamano, color=color, alpha=alpha, edgecolors='white', ax=ax_target)
-                
-            ax_target.set_title(f"{equipo}\nxG Total: {tiros_e['shot_statsbomb_xg'].sum():.2f}", color='white', fontsize=11)
+    st.pyplot(fig_ind)
 
-        render_tiros(tiros, eq1, ax_e1)
-        render_tiros(tiros, eq2, ax_e2)
-        
-        st.pyplot(fig_shots)
-
-# ==========================================
-# PESTAÑA 3: COMPARADOR DE JUGADORES (RADAR)
-# ==========================================
-with tab3:
-    st.subheader("⚔️ Comparador Cara a Cara de Jugadores")
+with col_graf2:
+    st.subheader(f"🔥 Zona de Influencia")
+    fig_kde, ax_kde = plt.subplots(figsize=(6, 4.5), facecolor='#19232d')
+    pitch.draw(ax=ax_kde)
     
-    todos_jugadores = sorted(df_eventos['player'].dropna().unique())
-    
-    col_sel1, col_sel2 = st.columns(2)
-    with col_sel1:
-        j1 = st.selectbox("Selecciona Jugador 1 (Verde):", todos_jugadores, index=0)
-    with col_sel2:
-        j2 = st.selectbox("Selecciona Jugador 2 (Azul):", todos_jugadores, index=min(1, len(todos_jugadores)-1))
-        
-    def obtener_metrics(nombre):
-        df_j = df_eventos[df_eventos['player'] == nombre]
-        pases = df_j[df_j['type'] == 'Pass']
-        tot_p = len(pases)
-        p_comp = len(pases[pases['pass_outcome'].isna()])
-        prec_p = (p_comp / tot_p * 100) if tot_p > 0 else 0
-        
-        pases_prog = 0
-        for _, p in pases.iterrows():
-            if (p['pass_end_location'][0] - p['location'][0]) >= 10:
-                pases_prog += 1
-                
-        tiros_j = df_j[df_j['type'] == 'Shot']
-        tot_t = len(tiros_j)
-        xg = tiros_j['shot_statsbomb_xg'].sum() if tot_t > 0 else 0
-        defensivas = len(df_j[df_j['type'].isin(['Duel', 'Interception', 'Ball Recovery', 'Block'])])
-        
-        return [tot_p, round(prec_p, 1), pases_prog, tot_t, round(xg, 2), defensivas]
-
-    params = ["Pases Intentados", "Precisión Pases %", "Pases Progresivos", "Tiros", "xG Generado", "Acciones Defensivas"]
-    val1 = obtener_metrics(j1)
-    val2 = obtener_metrics(j2)
-
-    col_rad, col_tab = st.columns([1.2, 1])
-    
-    with col_rad:
-        baker = PyPizza(
-            params=params,
-            background_color="#19232d",
-            straight_line_color="#c7d5cc",
-            straight_line_lw=1,
-            last_circle_lw=1,
-            other_circle_lw=1,
-            inner_circle_size=5
+    if len(pases_jugador) > 2:
+        sns.kdeplot(
+            x=pases_jugador['x'], y=pases_jugador['y'],
+            fill=True, thresh=0.05, levels=50, cmap='hot', alpha=0.6, ax=ax_kde
         )
-
-        fig_pizza, ax_pizza = baker.make_pizza(
-            val1,
-            compare_values=val2,
-            figsize=(7, 7),
-            param_location=106,
-            kwargs_slices=dict(facecolor="#2ecc71", edgecolor="#19232d", linewidth=1, alpha=0.6),
-            kwargs_compare=dict(facecolor="#3498db", edgecolor="#19232d", linewidth=1, alpha=0.6),
-            kwargs_params=dict(color="white", fontsize=10),
-            kwargs_values=dict(alpha=0),
-            kwargs_compare_values=dict(alpha=0)
-        )
-        st.pyplot(fig_pizza)
-
-    with col_tab:
-        st.markdown(f"#### 📊 Métricas Comparativas")
-        df_comp = pd.DataFrame({
-            'Métrica': params,
-            j1: val1,
-            j2: val2
-        })
-        st.dataframe(df_comp, use_container_width=True, hide_index=True)
+    st.pyplot(fig_kde)
