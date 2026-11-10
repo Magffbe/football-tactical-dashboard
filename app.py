@@ -62,7 +62,7 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # =========================================================
-# PESTAÑA 1: ANÁLISIS POR JUGADOR Y PARTIDO (CÓDIGO ORIGINAL)
+# PESTAÑA 1: ANÁLISIS INDIVIDUAL Y MAPAS (CON SHOTMAP XG)
 # =========================================================
 with tab1:
     st.header("📊 Rendimiento Individual y Mapas de Acción")
@@ -114,11 +114,11 @@ with tab1:
         c2.metric("Completados", comp_p)
         c3.metric("Fallados", fall_p)
         c4.metric("Precisión", f"{prec_p:.1f}%")
-        c5.metric("Pases Progresivos", pases_prog)
+        c5.metric("xG Acumulado", f"{xg_total:.2f}")
         
         st.divider()
         
-        # Gráficos Individuales
+        # Gráficos Individuales (Mapa de Pases y Heatmap)
         col_g1, col_g2 = st.columns(2)
         pitch = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
         
@@ -141,6 +141,46 @@ with tab1:
             if len(df_j1.dropna(subset=['x', 'y'])) > 2:
                 sns.kdeplot(x=df_j1['x'], y=df_j1['y'], fill=True, thresh=0.05, levels=50, cmap='hot', alpha=0.6, ax=ax2)
             st.pyplot(fig2)
+            
+        st.divider()
+
+        # NUEVO MÓDULO: MAPA DE TIROS Y XG DEL EQUIPO EN EL PARTIDO
+        st.markdown(f"#### 🎯 Mapa de Tiros (Shotmap) y xG del Equipo: **{equipo_sel1}**")
+        st.caption("● Gol (Verde)  |  ● Atajado/Bloqueado (Rojo)  |  ● Desviado (Gris)   [Círculo grande = Mayor xG]")
+        
+        df_tiros_eq = df_eq1[df_eq1['type_name'] == 'Shot'].copy()
+        df_tiros_eq['xg'] = df_tiros_eq['shot'].apply(lambda x: x.get('statsbomb_xg', 0) if isinstance(x, dict) else 0)
+        df_tiros_eq['outcome'] = df_tiros_eq['shot'].apply(lambda x: x.get('outcome', {}).get('name', '') if isinstance(x, dict) else '')
+        
+        def obtener_color_resultado(resultado):
+            if resultado == 'Goal':
+                return '#2ecc71'
+            elif resultado in ['Saved', 'Blocked']:
+                return '#e74c3c'
+            else:
+                return '#95a5a6'
+
+        df_tiros_eq['color'] = df_tiros_eq['outcome'].apply(obtener_color_resultado)
+
+        col_shot1, col_shot2, col_shot3 = st.columns([1, 3, 1])
+        with col_shot2:
+            fig_shot, ax_shot = plt.subplots(figsize=(8, 5.2), facecolor='#19232d')
+            pitch.draw(ax=ax_shot)
+            
+            if len(df_tiros_eq) > 0:
+                pitch.scatter(
+                    df_tiros_eq['x'], df_tiros_eq['y'],
+                    s=df_tiros_eq['xg'] * 700 + 50,
+                    color=df_tiros_eq['color'],
+                    edgecolors='white',
+                    linewidth=1.5,
+                    alpha=0.85,
+                    ax=ax_shot
+                )
+            else:
+                ax_shot.text(60, 40, "Sin remates registrados para este equipo", color='white', ha='center', va='center')
+                
+            st.pyplot(fig_shot)
             
     except Exception:
         st.error("No se pudieron obtener datos completos para este partido. Selecciona otro encuentro del listado.")
