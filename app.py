@@ -6,6 +6,7 @@ import seaborn as sns
 from mplsoccer import Pitch, PyPizza
 from statsbombpy import sb
 
+
 # ---------------------------------------------------------
 # 1. CONFIGURACIÓN GENERAL Y ESTILOS DE LA PÁGINA
 # ---------------------------------------------------------
@@ -16,11 +17,11 @@ st.set_page_config(
 )
 
 st.title("⚽ Dashboard Táctico de Fútbol Avanzado")
-st.markdown("Plataforma integral de análisis de rendimiento individual, radares comparativos y redes tácticas.")
+st.markdown("Plataforma integral de análisis de rendimiento individual, radares comparativos, redes tácticas y scouting de ligas actuales.")
 st.divider()
 
 # ---------------------------------------------------------
-# DICCIONARIOS Y CARGA DE DATOS
+# DICCIONARIOS Y CARGA DE DATOS (STATSBOMB + FBREF)
 # ---------------------------------------------------------
 @st.cache_data
 def obtener_partidos_mundial():
@@ -32,7 +33,6 @@ def obtener_partidos_mundial():
             partidos[label] = r['match_id']
         return partidos
     except Exception:
-        # Fallback con partidos verificados si falla el índice global
         return {
             "Japón 2 - 1 España (2022-12-01)": 3857255,
             "Argentina 3 - 3 Francia (2022-12-18)": 3869685,
@@ -54,11 +54,25 @@ def cargar_eventos_json(match_id):
     df['y'] = df['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else None)
     return df
 
-# Estrutura principal en Pestañas limpias
-tab1, tab2, tab3 = st.tabs([
+@st.cache_data(ttl=86400, show_spinner=False)
+def cargar_datos_fbref(temporada, liga):
+    df_todo = pd.read_csv("datos_fbref.csv")
+    df_limpio = df_todo[(df_todo['Temporada'] == temporada) & (df_todo['Liga'] == liga)].copy()
+
+    cols_numericas = ['Age', 'MP', 'Starts', 'Min', 'Gls_Total', 'Ast_Total', 'G+A_Total', 'Gls_P90', 'Ast_P90', 'G+A_P90']
+    for c in cols_numericas:
+        if c in df_limpio.columns:
+            df_limpio[c] = pd.to_numeric(df_limpio[c], errors='coerce').fillna(0)
+
+    return df_limpio
+   
+
+# Estructura principal en 4 Pestañas limpias
+tab1, tab2, tab3, tab4 = st.tabs([
     "📊 Rendimiento Individual", 
     "⚔️ Comparativa Cara a Cara (Radar)", 
-    "🕸️ Redes de Pases (Passing Networks)"
+    "🕸️ Redes de Pases (Passing Networks)",
+    "🌍 Ligas Actuales (Scouting FBref)"
 ])
 
 # =========================================================
@@ -83,18 +97,15 @@ with tab1:
         jugadores1 = sorted([j for j in df_eq1['player_name'].unique() if j])
         jugador_sel1 = st.selectbox("Selecciona un Jugador:", jugadores1, key="p1_player")
         
-        # Selector de Modo de Vista: Totales vs P90
         with col_sel3:
             modo_vista = st.radio("Modo Métrica:", ["Totales", "Por 90 min (P90)"], key="p1_mode")
         
         df_j1 = df_eq1[df_eq1['player_name'] == jugador_sel1]
         
-        # 1. Calcular minutos jugados
         min_inicio = df_j1['minute'].min() if len(df_j1) > 0 else 0
         min_fin = df_j1['minute'].max() if len(df_j1) > 0 else 0
         mins_jugados = max(1, (min_fin - min_inicio) + 1)
         
-        # 2. Pases
         pases_j1 = df_j1[df_j1['type_name'] == 'Pass'].copy()
         def es_comp(row):
             p_dict = row.get('pass', {})
@@ -107,7 +118,6 @@ with tab1:
         fall_p = total_p - comp_p
         prec_p = (comp_p / total_p * 100) if total_p > 0 else 0
         
-        # Pases progresivos
         pases_prog = 0
         for _, p in pases_j1.iterrows():
             pass_dict = p.get('pass', {})
@@ -115,24 +125,19 @@ with tab1:
                 if (pass_dict['end_location'][0] - p['x']) >= 10:
                     pases_prog += 1
 
-        # Tiros y xG
         tiros_j1 = df_j1[df_j1['type_name'] == 'Shot']
-        total_tiros = len(tiros_j1)
         xg_total = sum([t.get('shot', {}).get('statsbomb_xg', 0) for _, t in tiros_j1.iterrows() if isinstance(t.get('shot'), dict)])
         
-        # 3. Aplicar conversión P90 si el usuario lo activa
         if modo_vista == "Por 90 min (P90)":
             total_p_disp = round((total_p / mins_jugados) * 90, 1)
             comp_p_disp = round((comp_p / mins_jugados) * 90, 1)
             fall_p_disp = round((fall_p / mins_jugados) * 90, 1)
-            pases_prog_disp = round((pases_prog / mins_jugados) * 90, 1)
             xg_disp = round((xg_total / mins_jugados) * 90, 2)
             label_suffix = " (P90)"
         else:
             total_p_disp = total_p
             comp_p_disp = comp_p
             fall_p_disp = fall_p
-            pases_prog_disp = pases_prog
             xg_disp = round(xg_total, 2)
             label_suffix = ""
 
@@ -147,7 +152,6 @@ with tab1:
         
         st.divider()
         
-        # Gráficos Individuales (Mapa de Pases y Heatmap)
         col_g1, col_g2 = st.columns(2)
         pitch = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
         
@@ -164,7 +168,7 @@ with tab1:
             st.pyplot(fig1)
             
         with col_g2:
-            st.markdown(f"#### 🔥 Zona de Influencia (Heatmap)")
+            st.markdown("#### 🔥 Zona de Influencia (Heatmap)")
             fig2, ax2 = plt.subplots(figsize=(6, 4.2), facecolor='#19232d')
             pitch.draw(ax=ax2)
             if len(df_j1.dropna(subset=['x', 'y'])) > 2:
@@ -173,7 +177,6 @@ with tab1:
             
         st.divider()
 
-        # MAPA DE TIROS Y XG DEL EQUIPO
         st.markdown(f"#### 🎯 Mapa de Tiros (Shotmap) y xG del Equipo: **{equipo_sel1}**")
         st.caption("● Gol (Verde)  |  ● Atajado/Bloqueado (Rojo)  |  ● Desviado (Gris)   [Círculo grande = Mayor xG]")
         
@@ -194,7 +197,7 @@ with tab1:
         col_shot1, col_shot2, col_shot3 = st.columns([1, 3, 1])
         with col_shot2:
             fig_shot, ax_shot = plt.subplots(figsize=(8, 5.2), facecolor='#19232d')
-            pitch.draw(ax_shot)
+            pitch.draw(ax=ax_shot)
             
             if len(df_tiros_eq) > 0:
                 pitch.scatter(
@@ -270,12 +273,11 @@ with tab2:
             kwargs_slices=dict(facecolor="#2ecc71", edgecolor="#19232d", linewidth=1, alpha=0.6),
             kwargs_compare=dict(facecolor="#3498db", edgecolor="#19232d", linewidth=1, alpha=0.6),
             kwargs_params=dict(color="white", fontsize=10),
-            kwargs_values=dict(alpha=0),         # Oculta números superpuestos del jugador 1
-            kwargs_compare_values=dict(alpha=0)  # Oculta números superpuestos del jugador 2
+            kwargs_values=dict(alpha=0),
+            kwargs_compare_values=dict(alpha=0)
         )
         st.pyplot(fig_radar)
 
-    # Tabla comparativa con números exactos debajo del gráfico
     st.subheader("📋 Tabla Comparativa de Datos Reales")
     df_comp_tabla = pd.DataFrame({
         "Métrica": params,
@@ -315,12 +317,10 @@ with tab3:
         lambda x: x.get('recipient', {}).get('name', '') if isinstance(x, dict) and isinstance(x.get('recipient'), dict) else ''
     )
     
-    # 1. Posiciones Promedio
     pos_prom = pases_comp.groupby('player_name').agg(
         x_mean=('x', 'mean'), y_mean=('y', 'mean'), total_pases=('x', 'count')
     ).reset_index().sort_values(by='total_pases', ascending=False)
     
-    # 2. Conexiones (Mínimo 2 pases)
     conex = pases_comp.groupby(['player_name', 'recipient_name']).size().reset_index(name='pass_count')
     conex = conex.merge(pos_prom[['player_name', 'x_mean', 'y_mean']], on='player_name').rename(columns={'x_mean': 'x_start', 'y_mean': 'y_start'})
     conex = conex.merge(pos_prom[['player_name', 'x_mean', 'y_mean']], left_on='recipient_name', right_on='player_name', suffixes=('', '_end')).rename(columns={'x_mean': 'x_end', 'y_mean': 'y_end'})
@@ -328,23 +328,19 @@ with tab3:
     
     st.divider()
     
-    # 3. Gráfica de la Cancha en Matplotlib
     fig_net, ax_net = plt.subplots(figsize=(10, 6.5), facecolor='#19232d')
     pitch_net = Pitch(pitch_type='statsbomb', pitch_color='#19232d', line_color='#c7d5cc')
     pitch_net.draw(ax=ax_net)
     
-    # Dibujar líneas de pase con grosor proporcional y transparencia
     max_pases_pareja = conex['pass_count'].max() if len(conex) > 0 else 1
     for _, row in conex.iterrows():
-        grosor = (row['pass_count'] / max_pases_pareja) * 5 + 0.5  # Grosor controlado max 5.5px
+        grosor = (row['pass_count'] / max_pases_pareja) * 5 + 0.5
         alpha_v = min(row['pass_count'] / max_pases_pareja, 0.9)
         pitch_net.lines(row['x_start'], row['y_start'], row['x_end'], row['y_end'], ax=ax_net, color='#2ecc71', lw=grosor, alpha=alpha_v, zorder=1)
         
-    # Dibujar nodos de jugadores con escala contenida (evita círculos gigantes)
     tamanos_nodos = pos_prom['total_pases'] * 12 + 120
     pitch_net.scatter(pos_prom['x_mean'], pos_prom['y_mean'], s=tamanos_nodos, color='#e74c3c', edgecolors='white', linewidth=1.5, alpha=0.9, ax=ax_net, zorder=2)
     
-    # Nombres de jugadores con tipografía clara
     for _, row in pos_prom.iterrows():
         apellido = row['player_name'].split()[-1] if row['player_name'] else ''
         pitch_net.annotate(
@@ -361,3 +357,94 @@ with tab3:
         
     ax_net.set_title(f"Estructura Táctica: {equipo_net_sel} ({partido_net_str})", color='white', fontsize=12, pad=12)
     st.pyplot(fig_net)
+
+# =========================================================
+# PESTAÑA 4: SCOUTING DE LIGAS ACTUALES (FBREF / SCRAPERFC)
+# =========================================================
+with tab4:
+    st.header("🌍 Scouting de Ligas Europeas (Datos Actualizados FBref)")
+    st.markdown("Explora estadísticas reales de temporada completa, promedios por 90 minutos y líderes ofensivos.")
+
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    with col_f1:
+        liga_sel = st.selectbox(
+            "Selecciona la Competición:",
+            ["Spain La Liga", "England Premier League", "UEFA Champions League", "Italy Serie A", "Germany Bundesliga", "France Ligue 1"],
+            key="p4_liga"
+        )
+    with col_f2:
+        temporada_sel = st.selectbox("Temporada:", ["2024-2025", "2023-2024"], key="p4_temp")
+    with col_f3:
+        min_minutos = st.number_input("Mín. Minutos:", min_value=0, max_value=3000, value=450, step=90, key="p4_mins")
+
+    try:
+        with st.spinner(f"⏳ Descargando y cacheando datos de {liga_sel} ({temporada_sel}) desde FBref..."):
+            df_liga = cargar_datos_fbref(temporada_sel, liga_sel)
+
+        # Filtros secundarios dinámicos
+        col_sub1, col_sub2 = st.columns(2)
+        with col_sub1:
+            equipos_disp = ["Todos los equipos"] + sorted(df_liga['Squad'].dropna().unique().tolist())
+            equipo_filtro = st.selectbox("Filtrar por Club:", equipos_disp, key="p4_club")
+        with col_sub2:
+            posiciones_disp = ["Todas las posiciones"] + sorted(df_liga['Pos'].dropna().unique().tolist())
+            pos_filtro = st.selectbox("Filtrar por Posición:", posiciones_disp, key="p4_pos")
+
+        # Aplicar filtros
+        df_filtrado = df_liga[df_liga['Min'] >= min_minutos].copy()
+        if equipo_filtro != "Todos los equipos":
+            df_filtrado = df_filtrado[df_filtrado['Squad'] == equipo_filtro]
+        if pos_filtro != "Todas las posiciones":
+            df_filtrado = df_filtrado[df_filtrado['Pos'] == pos_filtro]
+
+        if len(df_filtrado) > 0:
+            # KPIs Líderes
+            top_gol = df_filtrado.sort_values(by='Gls_Total', ascending=False).iloc[0]
+            top_ast = df_filtrado.sort_values(by='Ast_Total', ascending=False).iloc[0]
+            top_p90 = df_filtrado.sort_values(by='Gls_P90', ascending=False).iloc[0]
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("⚽ Máximo Goleador", f"{top_gol['Player']} ({int(top_gol['Gls_Total'])} goles)", top_gol['Squad'])
+            k2.metric("🎯 Máximo Asistidor", f"{top_ast['Player']} ({int(top_ast['Ast_Total'])} asist.)", top_ast['Squad'])
+            k3.metric("⚡ Mejor Promedio Goles/90", f"{top_p90['Player']} ({top_p90['Gls_P90']:.2f})", top_p90['Squad'])
+
+            st.divider()
+
+            # Gráfico de Dispersión: Goles Totales vs Asistencias Totales
+            st.subheader("📈 Mapa de Impacto Ofensivo (Goles vs. Asistencias)")
+            fig_scat, ax_scat = plt.subplots(figsize=(10, 4.5), facecolor='#19232d')
+            ax_scat.set_facecolor('#19232d')
+
+            ax_scat.scatter(
+                df_filtrado['Gls_Total'], df_filtrado['Ast_Total'],
+                s=df_filtrado['Min'] / 15, color='#2ecc71', alpha=0.75, edgecolors='white', linewidth=1
+            )
+
+            # Etiquetar a los 8 jugadores con más G+A
+            top_etiquetas = df_filtrado.sort_values(by='G+A_Total', ascending=False).head(8)
+            for _, r_et in top_etiquetas.iterrows():
+                ax_scat.annotate(
+                    r_et['Player'].split()[-1],
+                    (r_et['Gls_Total'] + 0.3, r_et['Ast_Total'] + 0.2),
+                    color='white', fontsize=8.5, weight='bold'
+                )
+
+            ax_scat.set_xlabel("Goles Totales", color='white')
+            ax_scat.set_ylabel("Asistencias Totales", color='white')
+            ax_scat.tick_params(colors='white')
+            for spine in ax_scat.spines.values():
+                spine.set_color('#4a5568')
+            ax_scat.grid(True, linestyle='--', alpha=0.2, color='white')
+            st.pyplot(fig_scat)
+
+            # Tabla completa de scouting
+            st.subheader("📋 Ranking de Jugadores (Ordenado por Goles Totales)")
+            cols_mostrar = ['Player', 'Squad', 'Pos', 'Age', 'MP', 'Min', 'Gls_Total', 'Ast_Total', 'G+A_Total', 'Gls_P90', 'Ast_P90']
+            cols_existentes = [c for c in cols_mostrar if c in df_filtrado.columns]
+            df_tabla_final = df_filtrado.sort_values(by='Gls_Total', ascending=False)[cols_existentes]
+            st.dataframe(df_tabla_final, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No hay jugadores que cumplan con los filtros seleccionados. Prueba reducir el mínimo de minutos.")
+
+    except Exception as e:
+        st.error(f"No se pudo conectar con FBref en este momento ({e}). Verifica que tengas Google Chrome instalado o intenta nuevamente.")
