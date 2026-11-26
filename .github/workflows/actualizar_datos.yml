@@ -33,7 +33,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Cachear dependencias de botasaurus
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/botasaurus
+          key: botasaurus-libs-v1
+
       - name: Ejecutar actualización hacia Supabase
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: xvfb-run -a python -u actualizar_datos.py
