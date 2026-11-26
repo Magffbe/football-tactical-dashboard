@@ -1,7 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 import ScraperFC as sfc
 import pandas as pd
 from sqlalchemy import text
 from database.connection import engine
+
+TIMEOUT_POR_LIGA = 150  # segundos máximos por liga
 
 ligas = [
     "Spain La Liga",
@@ -55,6 +59,7 @@ def limpiar_columnas_sql(df: pd.DataFrame) -> pd.DataFrame:
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
+
 def preparar_tipos(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas clave a numéricas para mantener consistencia en PostgreSQL."""
     # FBref entrega 'age' como 'años-días' (ej. '19-133'); tomamos solo los años
@@ -75,6 +80,11 @@ def preparar_tipos(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _descargar_liga_raw(scraper, temp: str, liga: str):
+    datos_dict = scraper.scrape_stats(temp, liga, "standard")
+    return datos_dict["player"].copy()
+
+
 def actualizar_supabase():
     print("Iniciando actualizar_supabase...")
     try:
@@ -87,21 +97,31 @@ def actualizar_supabase():
         lista_dfs = []
         print(f"\n================ TEMPORADA {temp} ================")
 
-        for liga in ligas:
+        for idx, liga in enumerate(ligas):
             try:
                 print(f"⏳ Descargando {liga} ({temp}) desde FBref...")
-                datos_dict = scraper.scrape_stats(temp, liga, "standard")
-                df = datos_dict["player"].copy()
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    futuro = executor.submit(_descargar_liga_raw, scraper, temp, liga)
+                    df_raw = futuro.result(timeout=TIMEOUT_POR_LIGA)
 
-                df = limpiar_columnas_sql(df)
+                df = limpiar_columnas_sql(df_raw)
                 df["liga"] = liga
                 df["temporada"] = temp
                 df = preparar_tipos(df)
 
                 lista_dfs.append(df)
                 print(f"✅ {liga} lista ({len(df)} filas)")
+            except FuturesTimeoutError:
+                print(f"⏱️ Timeout ({TIMEOUT_POR_LIGA}s) en {liga} ({temp}); se omite por ahora.")
+                try:
+                    scraper = sfc.FBref()
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"⚠️ Error en {liga} ({temp}): {e}")
+
+            if idx < len(ligas) - 1:
+                time.sleep(5)
 
         if lista_dfs:
             df_temp = pd.concat(lista_dfs, ignore_index=True)
