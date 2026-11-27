@@ -28,6 +28,9 @@ st.markdown(
             padding: 0.75rem 0.9rem;
             border-radius: 0.6rem;
         }
+        div[data-testid="stMetricValue"] {
+            font-size: clamp(1.15rem, 1.8vw, 1.65rem);
+        }
         @media (max-width: 768px) {
             .block-container {
                 padding-left: 0.85rem;
@@ -43,7 +46,6 @@ st.title("⚽ Plataforma de Scouting — Ligas Europeas")
 st.caption(
     "Evaluación de perfiles en ligas europeas: cruce entre volumen (_total), eficiencia (_p90), minutos y edad."
 )
-
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cargar_datos_fbref(temporada: str, liga: str) -> pd.DataFrame:
@@ -215,6 +217,18 @@ try:
                 key="p4_vol_y",
             )
 
+        jugadores_ordenados = df_filtrado.sort_values(
+            by=[metrica_vol_y, metrica_efi_x], ascending=False
+        )["player"].dropna().unique().tolist()
+
+        etiquetas_sel = st.multiselect(
+            "Jugadores a etiquetar en el gráfico (hasta 6 para evitar choques):",
+            jugadores_ordenados,
+            default=jugadores_ordenados[: min(5, len(jugadores_ordenados))],
+            max_selections=6,
+            key="p4_etiquetas_sel",
+        )
+
         med_x = float(df_filtrado[metrica_efi_x].median())
         med_y = float(df_filtrado[metrica_vol_y].median())
 
@@ -227,25 +241,30 @@ try:
             df_filtrado[metrica_vol_y],
             s=tamanos,
             color="#22c55e",
-            alpha=0.78,
+            alpha=0.72,
             edgecolors="#f8fafc",
-            linewidth=0.9,
+            linewidth=0.8,
         )
 
         ax_scat.axvline(med_x, color="#94a3b8", linestyle="--", linewidth=1, alpha=0.75)
         ax_scat.axhline(med_y, color="#94a3b8", linestyle="--", linewidth=1, alpha=0.75)
 
-        destacados = df_filtrado.sort_values(by=metrica_vol_y, ascending=False).head(8)
-        for _, r_et in destacados.iterrows():
+        offsets = [(10, 8), (12, -14), (-48, 8), (-48, -14), (10, -2), (-52, -2)]
+        destacados = df_filtrado[df_filtrado["player"].isin(etiquetas_sel)]
+
+        for idx_et, (_, r_et) in enumerate(destacados.iterrows()):
             nombre_corto = str(r_et.get("player", "")).split()[-1]
+            dx, dy = offsets[idx_et % len(offsets)]
             ax_scat.annotate(
                 nombre_corto,
                 (r_et[metrica_efi_x], r_et[metrica_vol_y]),
-                xytext=(5, 4),
+                xytext=(dx, dy),
                 textcoords="offset points",
                 color="#f8fafc",
                 fontsize=8.5,
                 fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.18", facecolor="#111827", edgecolor="#475569", linewidth=0.5, alpha=0.85),
+                arrowprops=dict(arrowstyle="-", color="#94a3b8", lw=0.7, shrinkA=0, shrinkB=4),
             )
 
         ax_scat.set_xlabel(f"Eficiencia: {metrica_efi_x} (línea punteada = mediana: {med_x:.2f})", color="#e2e8f0")
@@ -255,6 +274,14 @@ try:
             spine.set_color("#334155")
         ax_scat.grid(True, linestyle=":", alpha=0.2, color="#94a3b8")
         st.pyplot(fig_scat, width="stretch")
+
+        st.markdown("##### Top 8 de esta muestra (referencia rápida)")
+        cols_rapidas = [c for c in ["player", "squad", "age", "min", metrica_vol_y, metrica_efi_x, "perfil_scouting"] if c in df_filtrado.columns]
+        st.dataframe(
+            df_filtrado.sort_values(by=[metrica_vol_y, metrica_efi_x], ascending=False)[cols_rapidas].head(8),
+            width="stretch",
+            hide_index=True,
+        )
 
     with tab_comp:
         cols_mostrar = [
