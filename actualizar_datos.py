@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy import text
 from database.connection import engine
 
-TIMEOUT_POR_LIGA = 150  # segundos máximos por liga
+TIMEOUT_POR_LIGA = 240  # segundos máximos por liga en ejecución local
 
 ligas = [
     "Spain La Liga",
@@ -36,14 +36,11 @@ def limpiar_columnas_sql(df: pd.DataFrame) -> pd.DataFrame:
 
     df.columns = nuevas_cols
 
-    # Eliminar filas repetidas que FBref inserta como encabezado intermedio
     if "Player" in df.columns:
         df = df[df["Player"] != "Player"].copy()
 
-    # Descartar columnas residuales tipo 'Unnamed: 25'
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", case=False, na=False)]
 
-    # Misma normalización usada en migrate_csv.py
     df.columns = (
         df.columns.astype(str)
         .str.strip()
@@ -54,14 +51,12 @@ def limpiar_columnas_sql(df: pd.DataFrame) -> pd.DataFrame:
         .str.replace("/", "_per_", regex=False)
     )
 
-    # Eliminar columnas duplicadas si llegaran a existir tras limpiar nombres
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 
 def preparar_tipos(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas clave a numéricas para mantener consistencia en PostgreSQL."""
-    # FBref entrega 'age' como 'años-días' (ej. '19-133'); tomamos solo los años
     if "age" in df.columns:
         df["age"] = df["age"].astype(str).str.split("-").str[0]
 
@@ -92,7 +87,7 @@ def _worker_descargar_liga(temp: str, liga: str, queue: mp.Queue):
         queue.put(("error", str(e)))
 
 
-def descargar_liga_con_timeout(temp: str, liga: str, timeout_seg: int):
+def descargar_liga_con_timeout(temp: str, liga: str, timeout_seg: int) -> pd.DataFrame:
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
     proc = ctx.Process(target=_worker_descargar_liga, args=(temp, liga, queue))
@@ -106,22 +101,72 @@ def descargar_liga_con_timeout(temp: str, liga: str, timeout_seg: int):
         if proc.is_alive():
             proc.kill()
             proc.join()
+        queue.close()
+        queue.join_thread()
         raise TimeoutError(f"Timeout ({timeout_seg}s) en {liga} ({temp})")
 
+    resultado = None
     if not queue.empty():
-        estado, payload = queue.get()
-        if estado == "ok":
-            return payload
-        raise RuntimeError(payload)
+        resultado = queue.get()
 
-    raise RuntimeError(f"El proceso terminó sin devolver datos para {liga} ({temp})")
+    queue.close()
+    queue.join_thread()
+    proc.join()
+
+    if resultado is None:
+        raise RuntimeError(f"El proceso terminó sin devolver datos para {liga} ({temp})")
+
+    estado, payload = resultado
+    if estado == "ok":
+        return payload
+    raise RuntimeError(payload)
+
+
+def guardar_liga_en_supabase(df_liga: pd.DataFrame, temp: str, liga: str, cols_db: list[str]):
+    """Reemplaza únicamente los registros de esa temporada y esa liga."""
+    df_prep = df_liga.copy()
+    for c in cols_db:
+        if c not in df_prep.columns:
+            df_prep[c] = None
+    df_prep = df_prep[cols_db]
+
+    df_limpio_db = df_prep.astype(object).where(pd.notna(df_prep), None)
+    filas_df = df_limpio_db.to_dict(orient="records")
+
+    cols_sql = ", ".join([f'"{c}"' for c in cols_db])
+    param_names = [f"p_{idx}" for idx in range(len(cols_db))]
+    vals_sql = ", ".join([f":{p}" for p in param_names])
+
+    registros = [
+        {param_names[idx]: fila.get(c) for idx, c in enumerate(cols_db)}
+        for fila in filas_df
+    ]
+
+    with engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM estadisticas_fbref WHERE temporada = :temp AND liga = :liga"),
+            {"temp": temp, "liga": liga},
+        )
+        tamano_lote = 50
+        for i in range(0, len(registros), tamano_lote):
+            lote = registros[i : i + tamano_lote]
+            conn.execute(
+                text(f"INSERT INTO estadisticas_fbref ({cols_sql}) VALUES ({vals_sql})"),
+                lote,
+            )
+        conn.commit()
 
 
 def actualizar_supabase():
     print("Iniciando actualizar_supabase...")
 
+    with engine.connect() as conn:
+        cols_db = pd.read_sql(
+            text("SELECT * FROM estadisticas_fbref LIMIT 1"), conn
+        ).columns.tolist()
+
     for temp in temporadas:
-        lista_dfs = []
+        actualizadas = 0
         print(f"\n================ TEMPORADA {temp} ================")
 
         for idx, liga in enumerate(ligas):
@@ -134,8 +179,13 @@ def actualizar_supabase():
                 df["temporada"] = temp
                 df = preparar_tipos(df)
 
-                lista_dfs.append(df)
-                print(f"✅ {liga} lista ({len(df)} filas)")
+                if df.empty:
+                    print(f"⚠️ {liga} ({temp}) devolvió 0 filas; se omite guardado.")
+                else:
+                    print(f"🔄 Actualizando {liga} ({temp}) en Supabase ({len(df)} filas)...")
+                    guardar_liga_en_supabase(df, temp, liga, cols_db)
+                    actualizadas += 1
+                    print(f"✅ {liga} actualizada con éxito.")
             except TimeoutError as e:
                 print(f"⏱️ {e}; se omite por ahora.")
             except Exception as e:
@@ -144,51 +194,10 @@ def actualizar_supabase():
             if idx < len(ligas) - 1:
                 time.sleep(5)
 
-        if lista_dfs:
-            df_temp = pd.concat(lista_dfs, ignore_index=True)
-
-            # Alinear columnas con las que ya existen en 'estadisticas_fbref' en Supabase
-            with engine.connect() as conn:
-                cols_db = pd.read_sql(
-                    text("SELECT * FROM estadisticas_fbref LIMIT 1"), conn
-                ).columns.tolist()
-
-            # Agregar cualquier columna faltante y conservar el orden de la tabla
-            for c in cols_db:
-                if c not in df_temp.columns:
-                    df_temp[c] = None
-            df_temp = df_temp[cols_db]
-
-            print(f"🔄 Actualizando temporada '{temp}' en Supabase ({len(df_temp)} filas)...")
-            df_limpio_db = df_temp.astype(object).where(pd.notna(df_temp), None)
-            filas_df = df_limpio_db.to_dict(orient="records")
-
-            cols_sql = ", ".join([f'"{c}"' for c in cols_db])
-            param_names = [f"p_{idx}" for idx in range(len(cols_db))]
-            vals_sql = ", ".join([f":{p}" for p in param_names])
-
-            registros = [
-                {param_names[idx]: fila.get(c) for idx, c in enumerate(cols_db)}
-                for fila in filas_df
-            ]
-
-            with engine.connect() as conn:
-                conn.execute(
-                    text("DELETE FROM estadisticas_fbref WHERE temporada = :temp"),
-                    {"temp": temp},
-                )
-                tamano_lote = 50
-                for i in range(0, len(registros), tamano_lote):
-                    lote = registros[i : i + tamano_lote]
-                    conn.execute(
-                        text(f"INSERT INTO estadisticas_fbref ({cols_sql}) VALUES ({vals_sql})"),
-                        lote,
-                    )
-                conn.commit()
-
-            print(f"🎉 ¡Temporada '{temp}' cargada/actualizada en Supabase con éxito!")
+        if actualizadas > 0:
+            print(f"\n🎉 Temporada '{temp}': {actualizadas}/{len(ligas)} ligas actualizadas en Supabase.")
         else:
-            print(f"❌ No se pudieron obtener datos para la temporada {temp}.")
+            print(f"\n❌ No se pudo actualizar ninguna liga para la temporada {temp}.")
 
 
 if __name__ == "__main__":
