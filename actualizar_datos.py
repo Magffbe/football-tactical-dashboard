@@ -1,6 +1,5 @@
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import multiprocessing as mp
 import time
-import ScraperFC as sfc
 import pandas as pd
 from sqlalchemy import text
 from database.connection import engine
@@ -80,18 +79,46 @@ def preparar_tipos(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _descargar_liga_raw(scraper, temp: str, liga: str):
-    datos_dict = scraper.scrape_stats(temp, liga, "standard")
-    return datos_dict["player"].copy()
+def _worker_descargar_liga(temp: str, liga: str, queue: mp.Queue):
+    """Ejecuta el scraping de una liga en un proceso aislado."""
+    try:
+        import ScraperFC as sfc
+
+        scraper = sfc.FBref()
+        datos_dict = scraper.scrape_stats(temp, liga, "standard")
+        df_raw = datos_dict["player"].copy()
+        queue.put(("ok", df_raw))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def descargar_liga_con_timeout(temp: str, liga: str, timeout_seg: int):
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_worker_descargar_liga, args=(temp, liga, queue))
+
+    proc.start()
+    proc.join(timeout=timeout_seg)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        raise TimeoutError(f"Timeout ({timeout_seg}s) en {liga} ({temp})")
+
+    if not queue.empty():
+        estado, payload = queue.get()
+        if estado == "ok":
+            return payload
+        raise RuntimeError(payload)
+
+    raise RuntimeError(f"El proceso terminó sin devolver datos para {liga} ({temp})")
 
 
 def actualizar_supabase():
     print("Iniciando actualizar_supabase...")
-    try:
-        scraper = sfc.FBref()
-    except Exception as e:
-        print(f"Error al crear sfc.FBref(): {e}")
-        return
 
     for temp in temporadas:
         lista_dfs = []
@@ -100,9 +127,7 @@ def actualizar_supabase():
         for idx, liga in enumerate(ligas):
             try:
                 print(f"⏳ Descargando {liga} ({temp}) desde FBref...")
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    futuro = executor.submit(_descargar_liga_raw, scraper, temp, liga)
-                    df_raw = futuro.result(timeout=TIMEOUT_POR_LIGA)
+                df_raw = descargar_liga_con_timeout(temp, liga, TIMEOUT_POR_LIGA)
 
                 df = limpiar_columnas_sql(df_raw)
                 df["liga"] = liga
@@ -111,12 +136,8 @@ def actualizar_supabase():
 
                 lista_dfs.append(df)
                 print(f"✅ {liga} lista ({len(df)} filas)")
-            except FuturesTimeoutError:
-                print(f"⏱️ Timeout ({TIMEOUT_POR_LIGA}s) en {liga} ({temp}); se omite por ahora.")
-                try:
-                    scraper = sfc.FBref()
-                except Exception:
-                    pass
+            except TimeoutError as e:
+                print(f"⏱️ {e}; se omite por ahora.")
             except Exception as e:
                 print(f"⚠️ Error en {liga} ({temp}): {e}")
 
